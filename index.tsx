@@ -214,6 +214,14 @@ const EditorView = ({ config, onConfigChange, onBack }) => {
     const [edges, setEdges] = useState(config.edges);
     const [draggedNode, setDraggedNode] = useState(null);
     const [wiringState, setWiringState] = useState(null);
+    
+    // Refs for stable event handling to prevent stale closures and frequent effect re-binding
+    const draggedNodeRef = useRef(draggedNode);
+    const wiringStateRef = useRef(wiringState);
+    const canvasRef = useRef(null);
+
+    useEffect(() => { draggedNodeRef.current = draggedNode; }, [draggedNode]);
+    useEffect(() => { wiringStateRef.current = wiringState; }, [wiringState]);
 
     useEffect(() => {
         const notes = generateArchitectureNotes(nodes, edges);
@@ -223,6 +231,7 @@ const EditorView = ({ config, onConfigChange, onBack }) => {
 
     const handleNodeMouseDown = useCallback((e, nodeId) => {
         e.preventDefault();
+        e.stopPropagation();
         const node = nodes.find(n => n.id === nodeId);
         setDraggedNode({
             id: nodeId,
@@ -231,27 +240,47 @@ const EditorView = ({ config, onConfigChange, onBack }) => {
         });
     }, [nodes]);
 
+    // Handle mouse move globally when interacting
     const handleMouseMove = useCallback((e) => {
-        const canvasRect = e.currentTarget.getBoundingClientRect();
-        const mouseX = e.clientX - canvasRect.left;
-        const mouseY = e.clientY - canvasRect.top;
+        const currentWiring = wiringStateRef.current;
+        const currentDragged = draggedNodeRef.current;
 
-        if (wiringState) {
-            setWiringState(ws => ({ ...ws, endPos: { x: mouseX, y: mouseY } }));
+        if (currentWiring) {
+            if (canvasRef.current) {
+                const canvasRect = canvasRef.current.getBoundingClientRect();
+                const mouseX = e.clientX - canvasRect.left;
+                const mouseY = e.clientY - canvasRect.top;
+                setWiringState(ws => ({ ...ws, endPos: { x: mouseX, y: mouseY } }));
+            }
             return;
         }
 
-        if (!draggedNode) return;
-        e.preventDefault();
-        const newX = e.clientX - draggedNode.offsetX;
-        const newY = e.clientY - draggedNode.offsetY;
-        setNodes(prevNodes => prevNodes.map(n => n.id === draggedNode.id ? { ...n, position: { x: newX, y: newY } } : n));
-    }, [draggedNode, wiringState]);
+        if (currentDragged) {
+            e.preventDefault();
+            const newX = e.clientX - currentDragged.offsetX;
+            const newY = e.clientY - currentDragged.offsetY;
+            setNodes(prevNodes => prevNodes.map(n => n.id === currentDragged.id ? { ...n, position: { x: newX, y: newY } } : n));
+        }
+    }, []);
 
     const handleMouseUp = useCallback(() => {
         setDraggedNode(null);
         setWiringState(null);
     }, []);
+    
+    // Attach window listeners when interaction starts to ensure "mouseup" is caught everywhere
+    const isInteracting = !!draggedNode || !!wiringState;
+    useEffect(() => {
+        if (isInteracting) {
+            window.addEventListener('mousemove', handleMouseMove);
+            window.addEventListener('mouseup', handleMouseUp);
+        }
+        return () => {
+            window.removeEventListener('mousemove', handleMouseMove);
+            window.removeEventListener('mouseup', handleMouseUp);
+        };
+    }, [isInteracting, handleMouseMove, handleMouseUp]);
+
 
     const handleSocketMouseDown = useCallback((e, nodeId, socketType) => {
         if (socketType !== 'output') return;
@@ -270,6 +299,10 @@ const EditorView = ({ config, onConfigChange, onBack }) => {
         if (socketType !== 'input' || !wiringState) return;
 
         const { sourceId } = wiringState;
+        
+        // Explicitly clear wiring state when release occurs on a socket
+        setWiringState(null);
+
         if (sourceId === targetNodeId) return; // Disallow self-connection
 
         const edgeExists = edges.some(edge => edge.source === sourceId && edge.target === targetNodeId);
@@ -333,7 +366,7 @@ const EditorView = ({ config, onConfigChange, onBack }) => {
                 </div>
             </div>
             <div class="main-container">
-                <main class="canvas" onMouseMove=${handleMouseMove} onMouseUp=${handleMouseUp}>
+                <main class="canvas" ref=${canvasRef}>
                     <svg class="edges-svg">
                         ${edges.map(edge => h(Edge, { edge, nodes, onClick: handleEdgeDelete }))}
                         ${wiringState && html`<path class="edge-path-wiring" d=${getWiringPath()} />`}
