@@ -336,11 +336,13 @@ const Node = ({ data, onMouseDown, onCopy, onDelete, onSocketMouseDown, onSocket
   // Safety check
   if (!position) return null;
 
-  const handleActionClick = (e, action) => {
+  const handleAction = (e, action) => {
     e.preventDefault(); 
     e.stopPropagation();
     action(id);
   }
+
+  const stopProp = (e) => e.stopPropagation();
 
   const isComponent = type === 'component';
 
@@ -353,11 +355,11 @@ const Node = ({ data, onMouseDown, onCopy, onDelete, onSocketMouseDown, onSocket
       ${isComponent && html`<div class="node-label">${label}</div>`}
       <div 
         class="node-actions" 
-        onMouseDown=${(e) => e.stopPropagation()} 
-        onClick=${(e) => e.stopPropagation()}
+        onMouseDown=${stopProp} 
+        onClick=${stopProp}
       >
-          <button class="node-action-btn" title="Copy" onMouseDown=${(e) => handleActionClick(e, onCopy)}>📄</button>
-          <button class="node-action-btn" title="Delete" onMouseDown=${(e) => handleActionClick(e, onDelete)}>🗑️</button>
+          <button class="node-action-btn" title="Copy" onMouseDown=${stopProp} onClick=${(e) => handleAction(e, onCopy)}>📄</button>
+          <button class="node-action-btn" title="Delete" onMouseDown=${stopProp} onClick=${(e) => handleAction(e, onDelete)}>🗑️</button>
       </div>
       <div class="socket output" onMouseDown=${(e) => { e.stopPropagation(); onSocketMouseDown(e, id, 'output'); }}></div>
       <div class="socket input" onMouseUp=${(e) => { /* Removed stopPropagation here per previous fix */ onSocketMouseUp(e, id, 'input'); }}></div>
@@ -891,17 +893,88 @@ const App = () => {
     };
     setConfigurations([...configurations, newConfig]);
   };
+
+  const handleMegafyConfig = (configId) => {
+    const configToMegafy = configurations.find(c => c.id === configId);
+    if (!configToMegafy || configToMegafy.nodes.length === 0) {
+        alert("Cannot Mega-fy an empty configuration.");
+        return;
+    }
+
+    // 1. Create a Component definition from the current config
+    
+    // Normalize positions for the component definition
+    const minX = Math.min(...configToMegafy.nodes.map(n => n.position.x));
+    const minY = Math.min(...configToMegafy.nodes.map(n => n.position.y));
+
+    const componentNodes = configToMegafy.nodes.map(n => ({
+        ...n,
+        position: { x: n.position.x - minX, y: n.position.y - minY }
+    }));
+    
+    const newComponentId = generateId('comp');
+    const newComponent = {
+        id: newComponentId,
+        name: configToMegafy.name,
+        nodes: componentNodes,
+        edges: [...configToMegafy.edges]
+    };
+
+    // 2. Add this new component to the registry so the new nodes can find it
+    setSavedComponents(prev => [...prev, newComponent]);
+
+    // 3. Create the Mega-fied Config
+    //    It has the SAME topology (nodes/edges) as the original.
+    //    BUT, every node is now a reference to `newComponent`.
+    
+    const idMap = new Map();
+    const megaNodes = configToMegafy.nodes.map(node => {
+        const newId = generateId('node');
+        idMap.set(node.id, newId);
+        
+        return {
+            id: newId,
+            position: { ...node.position },
+            type: 'component',
+            componentId: newComponentId,
+            label: configToMegafy.name // Label it with the component name
+        };
+    });
+
+    const megaEdges = configToMegafy.edges.map(edge => ({
+        id: generateId('edge'),
+        source: idMap.get(edge.source),
+        target: idMap.get(edge.target),
+    }));
+
+    const newConfig = {
+        id: generateId('config'),
+        name: `Mega-${configToMegafy.name}`,
+        nodes: megaNodes,
+        edges: megaEdges,
+        notes: generateArchitectureNotes(megaNodes, megaEdges),
+    };
+
+    setConfigurations(prev => [...prev, newConfig]);
+  };
   
   const handleDeleteConfig = (configId) => {
-      if (configurations.length <= 1) {
-          alert("You cannot delete the last configuration.");
-          return;
-      }
       if (window.confirm("Are you sure you want to delete this AI configuration?")) {
-          const newConfigs = configurations.filter(c => c.id !== configId);
+          let newConfigs = configurations.filter(c => c.id !== configId);
+          if (newConfigs.length === 0) {
+             const newNodes = createDefaultNodes();
+             const newEdges = createDefaultEdges();
+             newConfigs = [{
+                id: generateId('config'),
+                name: "New AI",
+                nodes: newNodes,
+                edges: newEdges,
+                notes: generateArchitectureNotes(newNodes, newEdges)
+             }];
+          }
           setConfigurations(newConfigs);
-          if (testConfigId === configId) {
-              setTestConfigId(newConfigs[0]?.id || null);
+          if (testConfigId === configId || !newConfigs.find(c => c.id === testConfigId)) {
+              setTestConfigId(newConfigs[0].id);
           }
       }
   };
@@ -973,6 +1046,7 @@ const App = () => {
                             <button onClick=${(e) => { e.stopPropagation(); handleEditConfig(config.id) }}>Edit</button>
                             <button onClick=${(e) => { e.stopPropagation(); setRenamingConfigId(config.id) }}>Rename</button>
                             <button onClick=${(e) => { e.stopPropagation(); handleCopyConfig(config.id) }}>Copy</button>
+                            <button class="mega-btn" onClick=${(e) => { e.stopPropagation(); handleMegafyConfig(config.id) }} title="Recursive: Turn every node into a copy of this graph">Mega-fy</button>
                             <button onClick=${(e) => { e.stopPropagation(); setSubmitModalConfig(config) }}>Submit</button>
                             <button class="danger" onClick=${(e) => { e.stopPropagation(); handleDeleteConfig(config.id) }}>Delete</button>
                         </div>

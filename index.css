@@ -129,6 +129,16 @@ body {
     color: white;
 }
 
+.config-card-actions button.mega-btn {
+    color: #d0bfff;
+    border-color: #8a5ecc;
+}
+.config-card-actions button.mega-btn:hover {
+    background-color: #3d2a55;
+    color: #fff;
+    border-color: #a47ae8;
+}
+
 
 /* --- EDITOR VIEW STYLES --- */
 .canvas {
