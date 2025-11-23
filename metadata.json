@@ -1,0 +1,5 @@
+{
+  "name": "AI Node System",
+  "description": "An interactive application for building and testing AI models using a node-based configuration.",
+  "requestFramePermissions": []
+}
