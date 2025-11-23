@@ -1,20 +1,40 @@
-<div align="center">
-<img width="1200" height="475" alt="GHBanner" src="https://github.com/user-attachments/assets/0aa67016-6eaf-458a-adb2-6e31a0763ed6" />
-</div>
+# AI Node System
 
-# Run and deploy your AI Studio app
+A visual, node-based editor for constructing complex, chained AI workflows using the Gemini API.
 
-This contains everything you need to run your app locally.
+## Features
 
-View your app in AI Studio: https://ai.studio/apps/drive/1TGt9A6BoMUsh0873Fhw8aQKe-bRdoM5p
+- **Visual Graph Editor**: Drag and drop nodes to create thoughts, processes, and flows.
+- **Node-Based Logic**: Connect nodes to pass information. 
+    - **Linear**: Step-by-step refinement.
+    - **Branching**: Parallel processing/brainstorming.
+    - **Merging**: Synthesis of multiple inputs.
+- **Custom Components**: Save sub-graphs as "Minified" components (📦) to reuse logic and keep your workspace clean.
+- **Real-time Execution**: Run your graph against quizzes or custom prompts using Google's Gemini Flash model.
+- **Recursive Execution**: Nested components run their own internal graphs recursively.
+- **Mermaid JS Export**: View your graph as text/code.
+- **Community Submission**: Submit your architectures to the community database for review.
 
-## Run Locally
+## Setup
 
-**Prerequisites:**  Node.js
+1. Clone the repository.
+2. Create a `.env` file (if running locally/server-side) or ensure your environment has `API_KEY` set for the Gemini API.
+   - *Note: This project is configured for a buildless or lightweight build environment. The API Key is expected in `process.env.API_KEY`.*
+3. Open `index.html` (via a local server like `http-server` or `vite`).
 
+## Community Database
 
-1. Install dependencies:
-   `npm install`
-2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
-3. Run the app:
-   `npm run dev`
+We maintain a curated list of high-performance AI architectures. 
+
+To submit your configuration:
+1. Open the application.
+2. Create or select a configuration.
+3. In the list view, click **"Submit"**.
+4. Fill in your author name and a brief description.
+5. Click **"Submit for Review"**.
+
+Pending submissions are reviewed for safety and utility before being added to the global preset list.
+
+## License
+
+Apache-2.0

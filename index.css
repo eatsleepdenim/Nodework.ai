@@ -12,6 +12,8 @@
   --edge-color: #6a6a6a;
   --edge-color-active: #007bff;
   --shadow-color: rgba(0, 0, 0, 0.5);
+  --component-node-color: #3d2a55;
+  --component-node-border: #8a5ecc;
 }
 
 body {
@@ -153,17 +155,40 @@ body {
   display: flex;
   align-items: center;
   justify-content: center;
+  z-index: 10;
+}
+
+.node.component-node {
+    border-radius: 8px; /* Square for components */
+    border: 2px solid var(--component-node-border);
+    background-color: var(--component-node-color);
+    width: 80px;
+    height: 60px;
+    flex-direction: column;
+}
+
+.node-label {
+    font-size: 0.7rem;
+    color: #fff;
+    text-align: center;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    width: 90%;
+    margin-bottom: 4px;
+    font-weight: bold;
 }
 
 .node:hover {
   border-color: var(--accent-color);
+  z-index: 12;
 }
 
 .node:active {
   cursor: grabbing;
   box-shadow: 0 8px 24px var(--shadow-color);
   transform: scale(1.05);
-  z-index: 10;
+  z-index: 12;
 }
 
 .node-actions {
@@ -171,6 +196,13 @@ body {
   gap: 6px;
   opacity: 0;
   transition: opacity 0.2s ease;
+  pointer-events: auto;
+  position: absolute;
+  top: -30px; /* Move actions above node to avoid click conflicts */
+  background: var(--node-background);
+  padding: 4px 8px;
+  border-radius: 12px;
+  border: 1px solid var(--node-border);
 }
 
 .node:hover .node-actions {
@@ -508,13 +540,13 @@ body {
     margin: 0;
 }
 
-.app-header > div {
+.header-controls {
     display: flex;
     align-items: center;
     gap: 16px;
 }
 
-.add-node-btn, .back-btn {
+.add-node-btn, .back-btn, .icon-btn {
     background-color: var(--accent-color);
     color: white;
     border: none;
@@ -526,6 +558,14 @@ body {
     transition: background-color 0.2s ease;
 }
 
+.icon-btn {
+    background-color: var(--node-header-background);
+    border: 1px solid var(--node-border);
+}
+.icon-btn:hover {
+    background-color: #4f4f4f;
+}
+
 .add-node-btn:hover, .back-btn:hover {
     background-color: var(--accent-color-hover);
 }
@@ -535,4 +575,97 @@ body {
 }
 .back-btn:hover {
   background-color: #4f4f4f;
+}
+
+/* Modal */
+.modal-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: rgba(0, 0, 0, 0.7);
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    z-index: 100;
+}
+
+.modal-content {
+    background: var(--node-background);
+    border: 1px solid var(--node-border);
+    padding: 24px;
+    border-radius: 8px;
+    width: 80%;
+    max-width: 600px;
+    max-height: 80vh;
+    display: flex;
+    flex-direction: column;
+    box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+}
+
+.modal-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 16px;
+}
+
+.modal-close-btn {
+    background: transparent;
+    border: none;
+    color: var(--text-color);
+    font-size: 1.5rem;
+    cursor: pointer;
+}
+
+.code-viewer {
+    background: #111;
+    color: #0f0;
+    font-family: monospace;
+    padding: 16px;
+    border-radius: 4px;
+    overflow: auto;
+    white-space: pre;
+    flex-grow: 1;
+    border: 1px solid #333;
+    max-height: 60vh;
+}
+
+/* Dropdown */
+.dropdown {
+    position: relative;
+    display: inline-block;
+}
+
+.dropdown-content {
+    display: none;
+    position: absolute;
+    background-color: var(--node-background);
+    min-width: 180px;
+    box-shadow: 0px 8px 16px 0px rgba(0,0,0,0.5);
+    z-index: 50;
+    border: 1px solid var(--node-border);
+    border-radius: 4px;
+    top: 100%;
+    left: 0;
+    margin-top: 5px;
+}
+
+.dropdown:hover .dropdown-content {
+    display: block;
+}
+
+.dropdown-item {
+    color: var(--text-color);
+    padding: 12px 16px;
+    text-decoration: none;
+    display: block;
+    cursor: pointer;
+    transition: background-color 0.1s;
+}
+
+.dropdown-item:hover {
+    background-color: var(--accent-color);
+    color: white;
 }

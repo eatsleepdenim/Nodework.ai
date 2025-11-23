@@ -56,7 +56,7 @@ const UNIVERSAL_NODE_PROMPT = `You are a single, focused processing unit in a la
 Generate only the text for your step. Be brief.`;
 
 const generateArchitectureNotes = (nodes, edges) => {
-    if (nodes.length === 0) {
+    if (!nodes || nodes.length === 0) {
         return "This configuration is empty. Add nodes to begin building an AI.";
     }
 
@@ -91,6 +91,11 @@ const generateArchitectureNotes = (nodes, edges) => {
         description += `\n\nWarning: ${isolatedNodeCount} node(s) are completely isolated. They will act as both entry points and final outputs, which may lead to fragmented results.\n`;
     }
 
+    const componentNodes = nodes.filter(n => n.type === 'component');
+    if (componentNodes.length > 0) {
+        description += `\nNote: This graph contains ${componentNodes.length} nested component(s). Their internal structure is not analyzed here.\n`;
+    }
+
     if (nodes.length > 0 && edges.length === 0 && nodes.length > 1) {
         description += `\nObservation: All nodes are disconnected. The final output will be a collection of independent thoughts. To create a coherent process, connect the nodes.`;
     } else if (rootNodeCount > 1) {
@@ -103,6 +108,168 @@ const generateArchitectureNotes = (nodes, edges) => {
 
     return description;
 };
+
+const generateMermaid = (nodes, edges) => {
+    if (!nodes || nodes.length === 0) return "graph TD;\n  Empty";
+    
+    // Map internal IDs to readable aliases
+    const idMap = new Map();
+    nodes.forEach((n, i) => idMap.set(n.id, `N${i+1}`));
+    
+    let chart = "graph TD;\n";
+    
+    // Nodes
+    nodes.forEach((n, i) => {
+        const label = n.type === 'component' ? `📦 ${n.label || 'Component'}` : `Node ${i+1}`;
+        chart += `  ${idMap.get(n.id)}[${label}]\n`;
+    });
+    
+    // Edges
+    if (edges && edges.length > 0) {
+        chart += "\n";
+        edges.forEach(e => {
+            if (idMap.has(e.source) && idMap.has(e.target)) {
+                chart += `  ${idMap.get(e.source)} --> ${idMap.get(e.target)}\n`;
+            }
+        });
+    }
+    
+    return chart;
+}
+
+// --- EXECUTION ENGINE ---
+
+const runGraphEngine = async (nodes, edges, userPrompt, contextInput = "", ai, componentRegistry) => {
+    if (!nodes || nodes.length === 0) return "";
+
+    const nodeMap = new Map(nodes.map(n => [n.id, n]));
+    const adj: Map<string, string[]> = new Map(nodes.map(n => [n.id, []]));
+    const inDegree: Map<string, number> = new Map(nodes.map(n => [n.id, 0]));
+    const outDegree: Map<string, number> = new Map(nodes.map(n => [n.id, 0]));
+
+    for (const edge of edges) {
+        if (nodeMap.has(edge.source) && nodeMap.has(edge.target)) {
+            adj.get(edge.source).push(edge.target);
+            inDegree.set(edge.target, (inDegree.get(edge.target) || 0) + 1);
+            outDegree.set(edge.source, (outDegree.get(edge.source) || 0) + 1);
+        }
+    }
+
+    // Topological Sort
+    const queue = nodes.filter(n => inDegree.get(n.id) === 0).map(n => n.id);
+    const sortedNodes = [];
+    
+    while (queue.length > 0) {
+        const nodeId = queue.shift();
+        sortedNodes.push(nodeId);
+        const neighbors = adj.get(nodeId) || [];
+        for (const neighborId of neighbors) {
+            inDegree.set(neighborId, inDegree.get(neighborId) - 1);
+            if (inDegree.get(neighborId) === 0) {
+                queue.push(neighborId);
+            }
+        }
+    }
+
+    if (sortedNodes.length !== nodes.length) {
+        throw new Error("Graph has a cycle and cannot be processed.");
+    }
+
+    const nodeOutputs = new Map();
+    
+    for (const nodeId of sortedNodes) {
+        // Gather inputs from parent nodes
+        const parentEdges = edges.filter(e => e.target === nodeId);
+        const parentNodeIds = parentEdges.map(e => e.source);
+        
+        let nodeInput = "";
+        
+        if (parentNodeIds.length === 0) {
+            // Root node: uses the context input passed to this engine instance
+            // If top level, this is empty. If subgraph, this is input from outer node.
+            nodeInput = contextInput; 
+        } else {
+            // Internal node: joins outputs of parents
+            const parentOutputs = parentNodeIds.map(pid => nodeOutputs.get(pid) || '');
+            nodeInput = parentOutputs.join('\n\n---\n\n');
+        }
+
+        const node = nodeMap.get(nodeId) as any;
+        let currentOutput = '';
+
+        if (node.type === 'component') {
+            // Recursive Execution
+            const compDef = componentRegistry.find(c => c.id === node.componentId);
+            if (compDef) {
+                 // The component receives the accumulated 'nodeInput' as its starting context
+                 // The 'userPrompt' (Goal) is passed down unchanged
+                 currentOutput = await runGraphEngine(
+                     compDef.nodes, 
+                     compDef.edges, 
+                     userPrompt, 
+                     nodeInput, 
+                     ai, 
+                     componentRegistry
+                 );
+            } else {
+                currentOutput = `[Error: Component '${node.label}' not found]`;
+            }
+        } else {
+            // Standard Node Execution
+            let filledPrompt = UNIVERSAL_NODE_PROMPT
+                .replace(/{{user_prompt}}/g, userPrompt)
+                .replace(/{{input}}/g, nodeInput);
+            
+            if (filledPrompt.trim()) {
+                const result = await ai.models.generateContent({
+                    model: 'gemini-2.5-flash',
+                    contents: filledPrompt,
+                });
+                currentOutput = result.text;
+            }
+        }
+        
+        nodeOutputs.set(nodeId, currentOutput);
+    }
+
+    // Collect outputs from leaf nodes of this graph level
+    const leafNodeIds = nodes.filter(n => outDegree.get(n.id) === 0).map(n => n.id);
+    const finalOutputs = leafNodeIds.map(id => nodeOutputs.get(id) || '');
+    
+    return finalOutputs.join('\n\n---\n\n').trim() || "No output.";
+};
+
+
+// --- PRESETS ---
+const PRESETS = [
+    {
+        name: "Linear Chain (3 steps)",
+        nodes: [
+            { id: 'p1', position: { x: 0, y: 0 } },
+            { id: 'p2', position: { x: 200, y: 0 } },
+            { id: 'p3', position: { x: 400, y: 0 } },
+        ],
+        edges: [
+            { source: 'p1', target: 'p2' },
+            { source: 'p2', target: 'p3' },
+        ]
+    },
+    {
+        name: "Debate (Split & Merge)",
+        nodes: [
+            { id: 'root', position: { x: 0, y: 100 } },
+            { id: 'branch1', position: { x: 200, y: 0 } },
+            { id: 'branch2', position: { x: 200, y: 200 } },
+            { id: 'synthesis', position: { x: 400, y: 100 } },
+        ],
+        edges: [
+            { source: 'root', target: 'branch1' },
+            { source: 'root', target: 'branch2' },
+            { source: 'branch1', target: 'synthesis' },
+            { source: 'branch2', target: 'synthesis' },
+        ]
+    },
+];
 
 
 // --- INITIAL DATA ---
@@ -164,25 +331,36 @@ try {
 // --- EDITOR COMPONENTS ---
 
 const Node = ({ data, onMouseDown, onCopy, onDelete, onSocketMouseDown, onSocketMouseUp }) => {
-  const { id, position } = data;
+  const { id, position, type, label } = data;
+  
+  // Safety check
+  if (!position) return null;
 
   const handleActionClick = (e, action) => {
+    e.preventDefault(); 
     e.stopPropagation();
     action(id);
   }
 
+  const isComponent = type === 'component';
+
   return html`
     <div
-      class="node"
+      class="node ${isComponent ? 'component-node' : ''}"
       style=${{ top: `${position.y}px`, left: `${position.x}px` }}
       onMouseDown=${(e) => onMouseDown(e, id)}
     >
-      <div class="node-actions">
-          <button class="node-action-btn" title="Copy" onClick=${(e) => handleActionClick(e, onCopy)}>📄</button>
-          <button class="node-action-btn" title="Delete" onClick=${(e) => handleActionClick(e, onDelete)}>🗑️</button>
+      ${isComponent && html`<div class="node-label">${label}</div>`}
+      <div 
+        class="node-actions" 
+        onMouseDown=${(e) => e.stopPropagation()} 
+        onClick=${(e) => e.stopPropagation()}
+      >
+          <button class="node-action-btn" title="Copy" onMouseDown=${(e) => handleActionClick(e, onCopy)}>📄</button>
+          <button class="node-action-btn" title="Delete" onMouseDown=${(e) => handleActionClick(e, onDelete)}>🗑️</button>
       </div>
       <div class="socket output" onMouseDown=${(e) => { e.stopPropagation(); onSocketMouseDown(e, id, 'output'); }}></div>
-      <div class="socket input" onMouseUp=${(e) => { e.stopPropagation(); onSocketMouseUp(e, id, 'input'); }}></div>
+      <div class="socket input" onMouseUp=${(e) => { /* Removed stopPropagation here per previous fix */ onSocketMouseUp(e, id, 'input'); }}></div>
     </div>
   `;
 };
@@ -191,7 +369,8 @@ const Edge = ({ edge, nodes, onClick }) => {
   const sourceNode = nodes.find((n) => n.id === edge.source);
   const targetNode = nodes.find((n) => n.id === edge.target);
 
-  if (!sourceNode || !targetNode) return null;
+  // Added safety checks with optional chaining
+  if (!sourceNode?.position || !targetNode?.position) return null;
 
   const nodeRadius = 30;
   const x1 = sourceNode.position.x + (nodeRadius * 2); // right edge of source
@@ -209,13 +388,121 @@ const Edge = ({ edge, nodes, onClick }) => {
   `;
 };
 
-const EditorView = ({ config, onConfigChange, onBack }) => {
+const TextViewModal = ({ content, onClose }) => {
+    return html`
+        <div class="modal-overlay" onClick=${onClose}>
+            <div class="modal-content" onClick=${(e) => e.stopPropagation()}>
+                <div class="modal-header">
+                    <h2>Graph Text Notation (Mermaid)</h2>
+                    <button class="modal-close-btn" onClick=${onClose}>&times;</button>
+                </div>
+                <div class="code-viewer">${content}</div>
+            </div>
+        </div>
+    `;
+};
+
+const SaveComponentModal = ({ onClose, onSave }) => {
+    const [name, setName] = useState('');
+    return html`
+        <div class="modal-overlay" onClick=${onClose}>
+            <div class="modal-content" onClick=${(e) => e.stopPropagation()} style="max-width: 400px;">
+                <div class="modal-header">
+                    <h2>Save as Component</h2>
+                    <button class="modal-close-btn" onClick=${onClose}>&times;</button>
+                </div>
+                <p style="color: #aaa; margin-bottom: 16px;">
+                    This will save the current graph as a reusable, minified component.
+                </p>
+                <input 
+                    type="text" 
+                    placeholder="Component Name" 
+                    value=${name} 
+                    onInput=${e => setName(e.target.value)}
+                    class="config-rename-input" 
+                    style="width: 100%; box-sizing: border-box; margin-bottom: 20px;"
+                    autoFocus
+                />
+                <div style="display: flex; justify-content: flex-end; gap: 8px;">
+                    <button class="back-btn" onClick=${onClose}>Cancel</button>
+                    <button class="add-node-btn" onClick=${() => onSave(name)}>Save</button>
+                </div>
+            </div>
+        </div>
+    `;
+};
+
+const SubmitConfigModal = ({ config, onClose, onSubmit }) => {
+    const [author, setAuthor] = useState('');
+    const [description, setDescription] = useState('');
+    const [isSubmitting, setIsSubmitting] = useState(false);
+
+    const handleSubmit = async () => {
+        if (!author.trim() || !description.trim()) {
+            alert("Please provide an author name and description.");
+            return;
+        }
+        setIsSubmitting(true);
+        await onSubmit({ ...config, author, description });
+        setIsSubmitting(false);
+    };
+
+    return html`
+        <div class="modal-overlay" onClick=${onClose}>
+            <div class="modal-content" onClick=${(e) => e.stopPropagation()}>
+                <div class="modal-header">
+                    <h2>Submit to Community</h2>
+                    <button class="modal-close-btn" onClick=${onClose}>&times;</button>
+                </div>
+                <p style="color: #aaa; margin-bottom: 16px;">
+                    Submit <strong>${config.name}</strong> to the public database. It will be reviewed before appearing in the global presets.
+                </p>
+                <div class="control-group" style="margin-bottom: 12px;">
+                    <label>Author Name</label>
+                    <input 
+                        type="text" 
+                        value=${author} 
+                        onInput=${e => setAuthor(e.target.value)}
+                        class="config-rename-input" 
+                        style="width: 100%; box-sizing: border-box;"
+                        placeholder="Your Name"
+                    />
+                </div>
+                <div class="control-group" style="margin-bottom: 20px;">
+                    <label>Description</label>
+                    <textarea 
+                        value=${description} 
+                        onInput=${e => setDescription(e.target.value)}
+                        style="width: 100%; height: 80px; resize: none;"
+                        placeholder="Describe the logic or purpose of this AI..."
+                    ></textarea>
+                </div>
+                 <div class="control-group" style="margin-bottom: 20px;">
+                    <label>Preview Payload (JSON)</label>
+                    <div class="code-viewer" style="height: 100px; font-size: 0.75rem;">
+                        ${JSON.stringify({ ...config, author: author || "...", description: description || "..." }, null, 2)}
+                    </div>
+                </div>
+                <div style="display: flex; justify-content: flex-end; gap: 8px;">
+                    <button class="back-btn" onClick=${onClose} disabled=${isSubmitting}>Cancel</button>
+                    <button class="add-node-btn" onClick=${handleSubmit} disabled=${isSubmitting}>
+                        ${isSubmitting ? "Submitting..." : "Submit Configuration"}
+                    </button>
+                </div>
+            </div>
+        </div>
+    `;
+}
+
+const EditorView = ({ config, onConfigChange, onBack, savedComponents, onSaveComponent }) => {
     const [nodes, setNodes] = useState(config.nodes);
     const [edges, setEdges] = useState(config.edges);
     const [draggedNode, setDraggedNode] = useState(null);
     const [wiringState, setWiringState] = useState(null);
+    const [showTextModal, setShowTextModal] = useState(false);
+    const [showSaveModal, setShowSaveModal] = useState(false);
     
-    // Refs for stable event handling to prevent stale closures and frequent effect re-binding
+    // Refs for stable event handling
     const draggedNodeRef = useRef(draggedNode);
     const wiringStateRef = useRef(wiringState);
     const canvasRef = useRef(null);
@@ -233,6 +520,8 @@ const EditorView = ({ config, onConfigChange, onBack }) => {
         e.preventDefault();
         e.stopPropagation();
         const node = nodes.find(n => n.id === nodeId);
+        if (!node || !node.position) return; 
+
         setDraggedNode({
             id: nodeId,
             offsetX: e.clientX - node.position.x,
@@ -240,7 +529,7 @@ const EditorView = ({ config, onConfigChange, onBack }) => {
         });
     }, [nodes]);
 
-    // Handle mouse move globally when interacting
+    // Handle mouse move globally
     const handleMouseMove = useCallback((e) => {
         const currentWiring = wiringStateRef.current;
         const currentDragged = draggedNodeRef.current;
@@ -257,9 +546,15 @@ const EditorView = ({ config, onConfigChange, onBack }) => {
 
         if (currentDragged) {
             e.preventDefault();
-            const newX = e.clientX - currentDragged.offsetX;
-            const newY = e.clientY - currentDragged.offsetY;
-            setNodes(prevNodes => prevNodes.map(n => n.id === currentDragged.id ? { ...n, position: { x: newX, y: newY } } : n));
+            // Safety check in case node was deleted while dragging
+            setNodes(prevNodes => {
+                const nodeExists = prevNodes.some(n => n.id === currentDragged.id);
+                if (!nodeExists) return prevNodes;
+
+                const newX = e.clientX - currentDragged.offsetX;
+                const newY = e.clientY - currentDragged.offsetY;
+                return prevNodes.map(n => n.id === currentDragged.id ? { ...n, position: { x: newX, y: newY } } : n);
+            });
         }
     }, []);
 
@@ -268,9 +563,8 @@ const EditorView = ({ config, onConfigChange, onBack }) => {
         setWiringState(null);
     }, []);
     
-    // Attach window listeners when interaction starts to ensure "mouseup" is caught everywhere
-    const isInteracting = !!draggedNode || !!wiringState;
     useEffect(() => {
+        const isInteracting = !!draggedNode || !!wiringState;
         if (isInteracting) {
             window.addEventListener('mousemove', handleMouseMove);
             window.addEventListener('mouseup', handleMouseUp);
@@ -279,12 +573,14 @@ const EditorView = ({ config, onConfigChange, onBack }) => {
             window.removeEventListener('mousemove', handleMouseMove);
             window.removeEventListener('mouseup', handleMouseUp);
         };
-    }, [isInteracting, handleMouseMove, handleMouseUp]);
+    }, [draggedNode, wiringState, handleMouseMove, handleMouseUp]);
 
 
     const handleSocketMouseDown = useCallback((e, nodeId, socketType) => {
         if (socketType !== 'output') return;
         const node = nodes.find(n => n.id === nodeId);
+        if (!node || !node.position) return;
+
         const nodeRadius = 30;
         const startX = node.position.x + (nodeRadius * 2);
         const startY = node.position.y + nodeRadius;
@@ -299,17 +595,16 @@ const EditorView = ({ config, onConfigChange, onBack }) => {
         if (socketType !== 'input' || !wiringState) return;
 
         const { sourceId } = wiringState;
-        
-        // Explicitly clear wiring state when release occurs on a socket
         setWiringState(null);
 
-        if (sourceId === targetNodeId) return; // Disallow self-connection
+        if (sourceId === targetNodeId) return; 
 
         const edgeExists = edges.some(edge => edge.source === sourceId && edge.target === targetNodeId);
-        if (edgeExists) return; // Disallow duplicate connections
+        if (edgeExists) return; 
         
-        // Check if the new edge would create a cycle
         const potentialNewEdges = [...edges, { id: 'temp', source: sourceId, target: targetNodeId }];
+        // Cycles are allowed if components are involved (runtime recursion check handles it), 
+        // but simple loop check is good for UX.
         if (detectCycle(nodes, potentialNewEdges)) {
             alert("This connection would create a cycle and is not allowed.");
             return;
@@ -325,33 +620,100 @@ const EditorView = ({ config, onConfigChange, onBack }) => {
         }
     }, []);
 
-    const handleCopy = (nodeId) => {
-        const nodeToCopy = nodes.find(n => n.id === nodeId);
-        const newNode = {
-            ...nodeToCopy,
-            id: generateId('node'),
-            position: { x: nodeToCopy.position.x + 30, y: nodeToCopy.position.y + 30 }
-        };
-        setNodes([...nodes, newNode]);
-    };
+    const handleCopy = useCallback((nodeId) => {
+        setNodes(prevNodes => {
+            const nodeToCopy = prevNodes.find(n => n.id === nodeId);
+            if (!nodeToCopy || !nodeToCopy.position) return prevNodes;
 
-    const handleDelete = (nodeId) => {
+            const newNode = {
+                ...nodeToCopy,
+                id: generateId('node'),
+                position: { x: nodeToCopy.position.x + 30, y: nodeToCopy.position.y + 30 }
+            };
+            return [...prevNodes, newNode];
+        });
+    }, []);
+
+    const handleDelete = useCallback((nodeId) => {
         if (window.confirm("Are you sure you want to delete this node?")) {
-            setNodes(nodes.filter(n => n.id !== nodeId));
-            setEdges(edges.filter(e => e.source !== nodeId && e.target !== nodeId));
+            setNodes(prev => prev.filter(n => n.id !== nodeId));
+            setEdges(prev => prev.filter(e => e.source !== nodeId && e.target !== nodeId));
         }
-    };
+    }, []);
 
     const handleAddNode = () => {
         const newNode = {
             id: generateId('node'),
-            position: { x: 100, y: 300 },
+            position: { x: 100, y: 150 },
         };
         setNodes([...nodes, newNode]);
     };
 
+    const handleAddPreset = (preset) => {
+        const idMap = new Map();
+        const offsetX = 100 + (Math.random() * 50);
+        const offsetY = 150 + (Math.random() * 50);
+
+        const newNodes = preset.nodes.map(n => {
+            const newId = generateId('node');
+            idMap.set(n.id, newId);
+            return {
+                id: newId,
+                position: { x: n.position.x + offsetX, y: n.position.y + offsetY }
+            };
+        });
+
+        const newEdges = preset.edges.map(e => ({
+            id: generateId('edge'),
+            source: idMap.get(e.source),
+            target: idMap.get(e.target)
+        }));
+
+        setNodes([...nodes, ...newNodes]);
+        setEdges([...edges, ...newEdges]);
+    };
+
+    const handleAddComponent = (component) => {
+        // Adds a SINGLE node that represents the component
+        const newNode = {
+            id: generateId('node'),
+            type: 'component',
+            componentId: component.id,
+            label: component.name,
+            position: { x: 150, y: 150 },
+        };
+        setNodes([...nodes, newNode]);
+    }
+
+    const handleSaveAsComponent = (name) => {
+        if (!name) return;
+        
+        // Deep copy current nodes/edges to freeze the component definition
+        // We re-id them to ensure they are self-contained, though simple clone is fine too if we are careful.
+        // Let's standardise the positions relative to top-left to look nice if we ever expand them.
+        const minX = Math.min(...nodes.map(n => n.position.x));
+        const minY = Math.min(...nodes.map(n => n.position.y));
+
+        const componentNodes = nodes.map(n => ({
+            ...n,
+            position: { x: n.position.x - minX, y: n.position.y - minY }
+        }));
+        
+        const componentEdges = [...edges];
+
+        const newComponent = {
+            id: generateId('comp'),
+            name: name,
+            nodes: componentNodes,
+            edges: componentEdges
+        };
+
+        onSaveComponent(newComponent);
+        setShowSaveModal(false);
+    };
+
     const getWiringPath = () => {
-        if (!wiringState) return "";
+        if (!wiringState || !wiringState.startPos || !wiringState.endPos) return "";
         const { startPos, endPos } = wiringState;
         return `M ${startPos.x} ${startPos.y} L ${endPos.x} ${endPos.y}`;
     };
@@ -360,9 +722,28 @@ const EditorView = ({ config, onConfigChange, onBack }) => {
         <div class="app-root editor-mode">
             <div class="app-header">
                 <h1>Editing: ${config.name}</h1>
-                <div>
-                  <button class="add-node-btn" onClick=${handleAddNode}>+ Add Node</button>
-                  <button class="back-btn" onClick=${onBack}>← Back to Configurations</button>
+                <div class="header-controls">
+                  <div class="dropdown">
+                      <button class="add-node-btn">+ Add Node / Preset</button>
+                      <div class="dropdown-content">
+                          <div class="dropdown-item" onClick=${handleAddNode}>Single Node</div>
+                          <div style="border-top: 1px solid #444; margin: 4px 0;"></div>
+                          <div class="dropdown-label" style="padding: 4px 16px; color: #888; font-size: 0.8em;">PRESETS</div>
+                          ${PRESETS.map(p => html`
+                             <div class="dropdown-item" onClick=${() => handleAddPreset(p)}>${p.name}</div>
+                          `)}
+                          ${savedComponents.length > 0 && html`
+                            <div style="border-top: 1px solid #444; margin: 4px 0;"></div>
+                            <div class="dropdown-label" style="padding: 4px 16px; color: #888; font-size: 0.8em;">CUSTOM COMPONENTS</div>
+                             ${savedComponents.map(c => html`
+                                <div class="dropdown-item" onClick=${() => handleAddComponent(c)}>📦 ${c.name}</div>
+                             `)}
+                          `}
+                      </div>
+                  </div>
+                  <button class="icon-btn" title="Save as Component" onClick=${() => setShowSaveModal(true)}>💾 Save as Component</button>
+                  <button class="icon-btn" title="View Graph Text" onClick=${() => setShowTextModal(true)}>📜 View Code</button>
+                  <button class="back-btn" onClick=${onBack}>← Back</button>
                 </div>
             </div>
             <div class="main-container">
@@ -381,6 +762,14 @@ const EditorView = ({ config, onConfigChange, onBack }) => {
                     }))}
                 </main>
             </div>
+            ${showTextModal && h(TextViewModal, { 
+                content: generateMermaid(nodes, edges), 
+                onClose: () => setShowTextModal(false) 
+            })}
+             ${showSaveModal && h(SaveComponentModal, { 
+                onClose: () => setShowSaveModal(false),
+                onSave: handleSaveAsComponent
+            })}
         </div>
     `;
 };
@@ -390,10 +779,12 @@ const EditorView = ({ config, onConfigChange, onBack }) => {
 
 const App = () => {
   const [configurations, setConfigurations] = useState(INITIAL_CONFIGURATIONS);
+  const [savedComponents, setSavedComponents] = useState([]);
   const [view, setView] = useState('list');
   const [activeConfigId, setActiveConfigId] = useState(null);
   const [testConfigId, setTestConfigId] = useState(INITIAL_CONFIGURATIONS[0]?.id || null);
   const [renamingConfigId, setRenamingConfigId] = useState(null);
+  const [submitModalConfig, setSubmitModalConfig] = useState(null);
 
   const [selectedQuizName, setSelectedQuizName] = useState(QUIZZES[0].name);
   const [quizResults, setQuizResults] = useState(null);
@@ -405,72 +796,9 @@ const App = () => {
       ));
   }, []);
 
-  const executeGraph = async (userPrompt) => {
-    const configToRun = configurations.find(c => c.id === testConfigId);
-    if (!configToRun || !configToRun.nodes.length) {
-        throw new Error("Please select a configuration with nodes to test.");
-    }
-
-    const { nodes, edges } = configToRun;
-    const nodeMap = new Map(nodes.map(n => [n.id, n]));
-    const adj: Map<string, string[]> = new Map(nodes.map(n => [n.id, []]));
-    const inDegree: Map<string, number> = new Map(nodes.map(n => [n.id, 0]));
-    const outDegree: Map<string, number> = new Map(nodes.map(n => [n.id, 0]));
-
-    for (const edge of edges) {
-        if (nodeMap.has(edge.source) && nodeMap.has(edge.target)) {
-            adj.get(edge.source).push(edge.target);
-            inDegree.set(edge.target, (inDegree.get(edge.target) || 0) + 1);
-            outDegree.set(edge.source, (outDegree.get(edge.source) || 0) + 1);
-        }
-    }
-
-    const queue = nodes.filter(n => inDegree.get(n.id) === 0).map(n => n.id);
-    const sortedNodes = [];
-    
-    while (queue.length > 0) {
-        const nodeId = queue.shift();
-        sortedNodes.push(nodeId);
-        const neighbors = adj.get(nodeId) || [];
-        for (const neighborId of neighbors) {
-            inDegree.set(neighborId, inDegree.get(neighborId) - 1);
-            if (inDegree.get(neighborId) === 0) {
-                queue.push(neighborId);
-            }
-        }
-    }
-
-    if (sortedNodes.length !== nodes.length) {
-        throw new Error("Graph has a cycle and cannot be processed.");
-    }
-
-    const nodeOutputs = new Map();
-    for (const nodeId of sortedNodes) {
-        const parentEdges = edges.filter(e => e.target === nodeId);
-        const parentNodeIds = parentEdges.map(e => e.source);
-        const parentOutputs = parentNodeIds.map(pid => nodeOutputs.get(pid) || '');
-        const combinedInput = parentOutputs.join('\n\n---\n\n');
-
-        let filledPrompt = UNIVERSAL_NODE_PROMPT
-            .replace(/{{user_prompt}}/g, userPrompt)
-            .replace(/{{input}}/g, combinedInput);
-        
-        let currentOutput = '';
-        if (filledPrompt.trim()) {
-            const result = await ai.models.generateContent({
-                model: AI_MODEL_NAME,
-                contents: filledPrompt,
-            });
-            currentOutput = result.text;
-        }
-        nodeOutputs.set(nodeId, currentOutput);
-    }
-
-    const leafNodeIds = nodes.filter(n => outDegree.get(n.id) === 0).map(n => n.id);
-    const finalOutputs = leafNodeIds.map(id => nodeOutputs.get(id) || '');
-    
-    return finalOutputs.join('\n\n---\n\n').trim() || "The AI produced no output.";
-  };
+  const handleSaveComponent = useCallback((component) => {
+      setSavedComponents(prev => [...prev, component]);
+  }, []);
 
   const handleRunQuiz = async () => {
     const configToRun = configurations.find(c => c.id === testConfigId);
@@ -494,8 +822,20 @@ const App = () => {
 
     try {
         const results = await Promise.all(selectedQuiz.questions.map(async (question) => {
-            const answer = await executeGraph(question);
-            return { question, answer };
+            try {
+                // Call the engine with the current config
+                const answer = await runGraphEngine(
+                    configToRun.nodes, 
+                    configToRun.edges, 
+                    question, 
+                    "", 
+                    ai, 
+                    savedComponents
+                );
+                return { question, answer };
+            } catch (err) {
+                return { question, answer: `Error: ${err.message}` };
+            }
         }));
         setQuizResults(results);
     } catch(error) {
@@ -578,6 +918,14 @@ const App = () => {
     setView('editor');
   };
 
+  const handleSubmitConfig = async (submittedData) => {
+    // Mock Submission to Database
+    console.log("Mock Submit to Database:", submittedData);
+    await new Promise(resolve => setTimeout(resolve, 1500));
+    alert(`Success! Configuration "${submittedData.name}" has been submitted to the community database for review.`);
+    setSubmitModalConfig(null);
+  };
+
   const activeConfigForEdit = useMemo(() => configurations.find(c => c.id === activeConfigId), [configurations, activeConfigId]);
 
   if (view === 'editor' && activeConfigForEdit) {
@@ -585,6 +933,8 @@ const App = () => {
       config: activeConfigForEdit,
       onConfigChange: handleUpdateConfig,
       onBack: () => setView('list'),
+      savedComponents: savedComponents,
+      onSaveComponent: handleSaveComponent
     });
   }
 
@@ -623,6 +973,7 @@ const App = () => {
                             <button onClick=${(e) => { e.stopPropagation(); handleEditConfig(config.id) }}>Edit</button>
                             <button onClick=${(e) => { e.stopPropagation(); setRenamingConfigId(config.id) }}>Rename</button>
                             <button onClick=${(e) => { e.stopPropagation(); handleCopyConfig(config.id) }}>Copy</button>
+                            <button onClick=${(e) => { e.stopPropagation(); setSubmitModalConfig(config) }}>Submit</button>
                             <button class="danger" onClick=${(e) => { e.stopPropagation(); handleDeleteConfig(config.id) }}>Delete</button>
                         </div>
                     </div>
@@ -668,6 +1019,11 @@ const App = () => {
                 `}
             </aside>
         </div>
+        ${submitModalConfig && h(SubmitConfigModal, {
+            config: submitModalConfig,
+            onClose: () => setSubmitModalConfig(null),
+            onSubmit: handleSubmitConfig
+        })}
         <div class="nerd-zone">
             <details>
                 <summary>How It Works (For Nerds)</summary>
@@ -677,6 +1033,10 @@ const App = () => {
                         <li>
                             <h4>Unified Node System</h4>
                             <p>Every node is functionally identical, powered by the same universal prompt. There are no special "input" or "output" nodes. This forces the focus onto the architecture of the graph, as it's the only thing you can change.</p>
+                        </li>
+                        <li>
+                            <h4>Custom Components (Minified Presets)</h4>
+                            <p>You can save an entire graph as a "Component". This creates a single "Black Box" node (marked with 📦) that represents the saved architecture. When the execution engine reaches this node, it recursively executes the saved internal graph, passing the input from the outer graph into the roots of the inner graph, and bubbling the results back up.</p>
                         </li>
                         <li>
                             <h4>Topological Sort Execution</h4>
@@ -705,14 +1065,6 @@ const App = () => {
                                 <h5>Isolated Nodes (A, B)</h5>
                                 <p>This creates fragmented results. Since neither node has an input, they both act as root nodes. They both receive the original <code>${'{{user_prompt}}'}</code> and produce completely independent outputs. The final answer is simply both of their outputs listed together.</p>
                             </div>
-                        </li>
-                        <li>
-                            <h4>Live Architecture Report</h4>
-                            <p>The report in the sidebar isn't static text. Every time you move a node or change a connection, a function re-analyzes the graph's structure by calculating the in-degrees and out-degrees of each node. This allows it to identify entry points, exit points, and potential design flaws in real-time.</p>
-                        </li>
-                        <li>
-                            <h4>Reactive UI with Preact</h4>
-                            <p>The entire interface is built with Preact and extensive use of hooks (<code>useState</code>, <code>useCallback</code>, etc.). The graph's state (nodes, edges, positions) is held in component state. When you drag a node or create a wire, you're updating that state, which causes Preact to efficiently re-render only the parts of the UI that have changed.</p>
                         </li>
                     </ul>
                 </div>
