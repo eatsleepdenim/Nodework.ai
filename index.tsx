@@ -457,7 +457,7 @@ const SubmitConfigModal = ({ config, onClose, onSubmit }) => {
                     <button class="modal-close-btn" onClick=${onClose}>&times;</button>
                 </div>
                 <p style="color: #aaa; margin-bottom: 16px;">
-                    Submit <strong>${config.name}</strong> to the public database. It will be reviewed before appearing in the global presets.
+                    Download <strong>${config.name}</strong> as a JSON file to share with the community or submit to the repository.
                 </p>
                 <div class="control-group" style="margin-bottom: 12px;">
                     <label>Author Name</label>
@@ -488,7 +488,7 @@ const SubmitConfigModal = ({ config, onClose, onSubmit }) => {
                 <div style="display: flex; justify-content: flex-end; gap: 8px;">
                     <button class="back-btn" onClick=${onClose} disabled=${isSubmitting}>Cancel</button>
                     <button class="add-node-btn" onClick=${handleSubmit} disabled=${isSubmitting}>
-                        ${isSubmitting ? "Submitting..." : "Submit Configuration"}
+                        ${isSubmitting ? "Generating..." : "Download JSON"}
                     </button>
                 </div>
             </div>
@@ -992,10 +992,22 @@ const App = () => {
   };
 
   const handleSubmitConfig = async (submittedData) => {
-    // Mock Submission to Database
-    console.log("Mock Submit to Database:", submittedData);
-    await new Promise(resolve => setTimeout(resolve, 1500));
-    alert(`Success! Configuration "${submittedData.name}" has been submitted to the community database for review.`);
+    // Generates a JSON file for the user to download
+    const dataStr = JSON.stringify(submittedData, null, 2);
+    const blob = new Blob([dataStr], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    
+    const link = document.createElement('a');
+    link.href = url;
+    const safeName = submittedData.name.replace(/[^a-z0-9]/gi, '_').toLowerCase();
+    link.download = `submission-${safeName}-${Date.now()}.json`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    
+    await new Promise(resolve => setTimeout(resolve, 1000));
+    
+    alert(`Configuration downloaded! Please submit this file to the community database (e.g. via GitHub Issue or Email).`);
     setSubmitModalConfig(null);
   };
 
